@@ -1,317 +1,202 @@
 # تسعير – Taseer MVP
 
-A quote-request marketplace for the Saudi market.  
-Buyers submit requests → suppliers send offers → buyers pay a small fee to unlock supplier contact details.
-
-**Core flow:** Request → Offers → Payment → Unlock Supplier Contact
+نسخة تشغيلية مبسطة قابلة للاختبار المغلق.
 
 ---
 
-## What is implemented vs mocked
+## Core Loop
 
-| Feature | Status |
+```
+مشتري → ويزارد + OTP إلزامي → طلب محفوظ (phone_verified=true)
+      → إشعار واتساب فوري للموردين (approved+active فقط)
+      → مورد يرسل عرض
+      → إشعار واتساب للمشتري عند 1/3/5 عروض
+      → مشتري يطلب كشف بيانات مورد
+      → admin يوافق → واتساب للمشتري بالبيانات
+      → [لو لم يتصرف admin خلال 24h → كشف تلقائي]
+```
+
+---
+
+## Supplier Verification Flow
+
+```
+مورد يسجل → verification_status='pending', is_active=false
+          → admin يفتح /admin → تبويب "موردون معلقون"
+          → موافقة → POST /api/admin/suppliers/verify {action:'approved'}
+                   → verification_status='approved', is_active=true
+                   → verified_at=NOW(), verified_by='admin'
+                   → واتساب للمورد: "تم قبول طلبك ✅"
+          → رفض  → POST /api/admin/suppliers/verify {action:'rejected', reason:'...'}
+                   → verification_status='rejected', is_active=false
+                   → rejection_reason محفوظ
+                   → واتساب للمورد: "لم يتم قبول طلبك"
+```
+
+### حالات verification_status
+
+| الحالة | المعنى | يستقبل طلبات؟ |
+|---|---|---|
+| `pending` | سجّل ولم يُراجَع | ❌ |
+| `approved` | admin وافق | ✅ (مع is_active=true) |
+| `rejected` | رُفض عند التسجيل | ❌ |
+| `suspended` | كان نشطاً وأُوقف | ❌ |
+
+**approved ≠ trusted** — `is_trusted` يُمنح يدوياً فقط بعد أداء حقيقي.
+
+---
+
+## هيكل الملفات
+
+```
+app/
+  api/
+    otp/route.ts                    إرسال + تحقق OTP
+    suppliers/route.ts              تسجيل المورد (دائماً pending)
+    requests/route.ts               إنشاء طلب + إشعار الموردين
+    offers/route.ts                 عروض + طلب الكشف
+    admin/
+      route.ts                      لوحة الإدارة (GET + POST)
+      suppliers/verify/route.ts     ← endpoint مستقل للموافقة/الرفض
+    startup/route.ts                فحص إعدادات الإشعارات
+  admin/page.tsx                    لوحة الإدارة (7 تبويبات)
+  request/page.tsx                  ويزارد الطلب مع OTP
+  offers/page.tsx                   عرض العروض
+  supplier/page.tsx                 تسجيل + لوحة المورد
+  success/page.tsx                  بعد إرسال الطلب
+  track/page.tsx                    تتبع طلب برقمه
+lib/
+  notify.ts                         واتساب (Unifonic) + deduplication
+  ratelimit.ts                      حماية من السبام
+  session.ts                        جلسة مجهولة (localStorage)
+  supabase.ts                       browser + service role
+types/index.ts
+schema.sql                          قاعدة بيانات جديدة (fresh)
+migrate_rls.sql                     تحديث RLS على قاعدة موجودة
+migrate_suppliers_verification.sql  إضافة حقول التحقق على قاعدة موجودة
+```
+
+---
+
+## Matching Logic
+
+لا يدخل المطابقة إلا:
+```ts
+// app/api/requests/route.ts
+.eq('is_active', true)
+.eq('verification_status', 'approved')
+```
+
+---
+
+## Checklist قبل الإطلاق
+
+```
+[ ] شغّل schema.sql في Supabase SQL Editor
+[ ] أنشئ .env.local من .env.example وأملأ الـ 4 قيم المطلوبة
+[ ] ADMIN_SECRET_TOKEN: openssl rand -hex 24  (لا تستخدم الافتراضي)
+[ ] للإشعارات الحقيقية: UNIFONIC_APP_SID + UNIFONIC_SENDER + NOTIFY_ENABLED=true
+[ ] بعد النشر: افتح /api/startup → يجب أن يرجع mode:"live"
+[ ] سجّل 5-10 موردين حقيقيين عبر /supplier
+[ ] فعّلهم من /admin → تبويب "موردون معلقون"
+[ ] اختبر الـ flow كاملاً بجوالين حقيقيين
+```
+
+---
+
+## متى تستخدم أي ملف SQL؟
+
+| الحالة | الملف |
 |---|---|
-| Request wizard (all categories + car parts) | ✅ Real |
-| Supplier matching by category | ✅ Real |
-| Offers from suppliers | ✅ Real |
-| Contact info hidden before payment | ✅ Real |
-| Payment – Moyasar Sandbox | ✅ Sandbox (switch to live with one key change) |
-| Payment – webhook verification | ✅ Real (HMAC-SHA256) |
-| Unlock access stored in DB | ✅ Real |
-| Supplier registration | ✅ Real |
-| Admin dashboard | ✅ Real |
-| Supabase RLS policies | ✅ Real |
-| User authentication (login/signup) | ⚠️ Anonymous session only – add Supabase Auth for production |
-| Email / SMS notifications | ⚠️ Not implemented – add Resend or Twilio |
-| Supplier verification | ⚠️ Manual – no automated KYC |
+| قاعدة بيانات جديدة تماماً | `schema.sql` |
+| قاعدة موجودة، تحديث RLS فقط | `migrate_rls.sql` |
+| قاعدة موجودة، إضافة نظام التحقق | `migrate_suppliers_verification.sql` |
 
 ---
 
-## Tech stack
+## اختبار الـ flow بجوالين حقيقيين
 
-- **Frontend + API:** Next.js 14 (App Router, TypeScript)
-- **Database:** Supabase (PostgreSQL + Row Level Security)
-- **Payment:** Moyasar (Sandbox → Live by swapping API key)
-- **Deployment:** Vercel
-
----
-
-## Prerequisites
-
-Before you start you need free accounts at:
-
-1. [supabase.com](https://supabase.com) — database
-2. [vercel.com](https://vercel.com) — hosting
-3. [dashboard.moyasar.com](https://dashboard.moyasar.com) — payment gateway
-4. [github.com](https://github.com) — to push the code
-
----
-
-## Step 1 — Set up Supabase
-
-### 1.1 Create a project
-
-1. Go to [supabase.com](https://supabase.com) and sign in.
-2. Click **New project**.
-3. Choose a name (e.g. `taseer`), set a strong database password, pick the **Middle East** region.
-4. Wait ~2 minutes for the project to be ready.
-
-### 1.2 Run the schema
-
-1. In your Supabase project, click **SQL Editor** in the left sidebar.
-2. Click **New query**.
-3. Open `schema.sql` from this project, copy the entire contents, paste into the editor.
-4. Click **Run** (or press Ctrl+Enter).
-5. You should see "Success. No rows returned." — this means all tables, indexes, RLS policies, triggers, and seed data were created.
-
-### 1.3 Get your API keys
-
-1. Click **Settings** → **API** in the left sidebar.
-2. Copy these three values — you will need them in Step 3:
-   - **Project URL** → `NEXT_PUBLIC_SUPABASE_URL`
-   - **anon / public key** → `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-   - **service_role / secret key** → `SUPABASE_SERVICE_ROLE_KEY`
-
-> ⚠️ Never expose `SUPABASE_SERVICE_ROLE_KEY` to the browser. It is only used in API routes.
-
----
-
-## Step 2 — Set up Moyasar (Sandbox)
-
-### 2.1 Create an account
-
-1. Go to [dashboard.moyasar.com](https://dashboard.moyasar.com) and register.
-2. Your account starts in **Sandbox mode** automatically.
-
-### 2.2 Get your API keys
-
-1. In Moyasar Dashboard, go to **Settings → API Keys**.
-2. Copy the **Secret Key** (starts with `sk_test_`).  
-   This goes into `MOYASAR_API_KEY`.
-
-### 2.3 Set up webhook
-
-1. In Moyasar Dashboard, go to **Settings → Webhooks**.
-2. Click **Add Endpoint**.
-3. URL: `https://your-app.vercel.app/api/payment/webhook`  
-   (you will update this with the real Vercel URL after deployment)
-4. Select event: **payment.paid**
-5. Copy the **Webhook Secret** → `MOYASAR_WEBHOOK_SECRET`
-
-### 2.4 Test cards (Sandbox)
-
-| Card number | Result |
-|---|---|
-| `4111 1111 1111 1111` | Success |
-| `4000 0000 0000 0002` | Declined |
-
-Use any future expiry date and any 3-digit CVV.
-
----
-
-## Step 3 — Configure environment variables
-
-Copy `.env.example` to `.env.local`:
-
-```bash
-cp .env.example .env.local
 ```
+الجوال الأول (admin):
+1. افتح /supplier → سجّل كمورد
+2. افتح /admin → وافق على نفسك
 
-Fill in all values:
-
-```env
-# Supabase
-NEXT_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT_ID.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-
-# Moyasar
-MOYASAR_API_KEY=sk_test_...
-MOYASAR_WEBHOOK_SECRET=whsec_...
-
-# App URL (use localhost for local dev)
-NEXT_PUBLIC_APP_URL=http://localhost:3000
-
-# Admin panel token (change this to a long random string)
-ADMIN_SECRET_TOKEN=taseer-admin-dev
+الجوال الثاني (مشتري):
+3. افتح /request → أرسل طلب في نفس الفئة
+4. تحقق بـ OTP
+5. الجوال الأول يستقبل واتساب بالطلب
+6. افتح /supplier بالجوال الأول → أرسل عرض
+7. الجوال الثاني يستقبل واتساب: "وصل عرض"
+8. افتح رابط العروض → اضغط "طلب كشف بيانات"
+9. /admin → تبويب "طلبات الكشف" → وافق
+10. الجوال الثاني يستقبل واتساب ببيانات المورد
 ```
 
 ---
 
-## Step 4 — Run locally
+## API Reference
 
-```bash
-# Install dependencies
-npm install
+### POST /api/admin/suppliers/verify
+```
+Headers: x-admin-token: YOUR_TOKEN
+Body: { supplier_id, action: "approved"|"rejected", reason?, admin_name? }
 
-# Start dev server
-npm run dev
+عند approved: verification_status='approved', is_active=true, verified_at, verified_by
+             + واتساب للمورد
+
+عند rejected: verification_status='rejected', is_active=false, rejection_reason
+             + واتساب للمورد
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
-
-### Local test flow
-
-1. Go to [http://localhost:3000](http://localhost:3000)
-2. Click **اطلب تسعيرة** and complete the wizard
-3. Note the request code shown on the success page
-4. Go to [http://localhost:3000/offers?request_id=YOUR_ID](http://localhost:3000/offers)
-5. You will see no offers yet (you are the buyer)
-6. Open a new tab: [http://localhost:3000/supplier](http://localhost:3000/supplier)
-7. Register as a supplier in the same category as your request
-8. Submit a price offer
-9. Go back to the offers page — you should see the offer
-10. Click **اكشف بيانات المورد** — in sandbox mode, no real payment is charged
-11. Supplier contact info appears
-
----
-
-## Step 5 — Deploy to Vercel
-
-### 5.1 Push to GitHub
-
-```bash
-git init
-git add .
-git commit -m "initial commit"
-git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/taseer-mvp.git
-git push -u origin main
+### POST /api/requests
+```
+يشترط: phone_verified=true في body (وفي DB عبر RLS)
+المطابقة: is_active=true AND verification_status='approved' فقط
 ```
 
-### 5.2 Import to Vercel
-
-1. Go to [vercel.com](https://vercel.com) and sign in.
-2. Click **Add New → Project**.
-3. Import your GitHub repository.
-4. Vercel auto-detects Next.js — no configuration needed.
-
-### 5.3 Add environment variables
-
-In the Vercel project settings, go to **Settings → Environment Variables** and add all variables from `.env.local`:
-
-| Variable | Value |
-|---|---|
-| `NEXT_PUBLIC_SUPABASE_URL` | your Supabase project URL |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | your Supabase anon key |
-| `SUPABASE_SERVICE_ROLE_KEY` | your Supabase service role key |
-| `MOYASAR_API_KEY` | `sk_test_...` |
-| `MOYASAR_WEBHOOK_SECRET` | your Moyasar webhook secret |
-| `NEXT_PUBLIC_APP_URL` | `https://your-app.vercel.app` |
-| `ADMIN_SECRET_TOKEN` | a long random string |
-
-### 5.4 Deploy
-
-Click **Deploy**. Vercel builds and deploys automatically (~2 minutes).
-
-Your live URL will be: `https://your-app-name.vercel.app`
-
-### 5.5 Update Moyasar webhook URL
-
-Go back to Moyasar Dashboard → Webhooks → update the URL to:  
-`https://your-app-name.vercel.app/api/payment/webhook`
-
----
-
-## Step 6 — Switch to live payments
-
-When you are ready to accept real payments:
-
-1. In Moyasar Dashboard, complete KYC verification.
-2. Get your **Live Secret Key** (starts with `sk_live_`).
-3. In Vercel → Settings → Environment Variables, update:
-   - `MOYASAR_API_KEY` → `sk_live_...`
-4. Redeploy (Vercel redeploys automatically on env var change).
-
-That is the only change needed. All payment logic stays the same.
-
----
-
-## Project structure
-
+### POST /api/offers — طلب كشف
 ```
-taseer-mvp/
-├── app/
-│   ├── api/
-│   │   ├── requests/route.ts       POST create request, GET by code
-│   │   ├── offers/route.ts         GET offers (with unlock), POST submit offer
-│   │   ├── payment/
-│   │   │   ├── route.ts            POST initiate Moyasar payment
-│   │   │   ├── callback/route.ts   GET Moyasar redirect after payment
-│   │   │   ├── webhook/route.ts    POST Moyasar server webhook
-│   │   │   └── sandbox-confirm/    POST simulate payment (dev only)
-│   │   ├── suppliers/route.ts      POST register, GET assigned requests
-│   │   └── admin/route.ts          GET dashboard data (token protected)
-│   ├── page.tsx                    Homepage
-│   ├── request/page.tsx            Request wizard
-│   ├── success/page.tsx            Post-request success screen
-│   ├── offers/page.tsx             Offers list + payment unlock
-│   ├── supplier/page.tsx           Supplier registration + dashboard
-│   ├── admin/page.tsx              Admin dashboard
-│   └── layout.tsx                  Root layout
-├── components/
-│   ├── Nav.tsx                     Navbar
-│   ├── Footer.tsx                  Footer
-│   ├── OfferCard.tsx               Single offer card with lock/unlock
-│   └── PaymentModal.tsx            Payment package selector + Moyasar
-├── lib/
-│   ├── supabase.ts                 Browser + service role clients
-│   ├── session.ts                  Anonymous session ID helper
-│   ├── auth.ts                     Auth helpers for API routes
-│   └── moyasar.ts                  Moyasar API + webhook verification
-├── types/
-│   └── index.ts                    All shared TypeScript types
-├── styles/
-│   └── globals.css                 Complete stylesheet (RTL Arabic)
-├── schema.sql                      Full Supabase schema + RLS + seed data
-├── .env.example                    All required environment variables
-├── package.json
-├── next.config.js
-└── tsconfig.json
+Body: { _action: "request_reveal", offer_id, session_id, requester_phone? }
+ينشئ reveal_request بحالة pending + auto_approve_at = +24h
 ```
 
 ---
 
-## Admin panel
+## Cron للكشف التلقائي
 
-URL: `/admin`  
-Default dev token: `taseer-admin-dev`
-
-Change `ADMIN_SECRET_TOKEN` in your environment variables before going live.
-
-The admin panel shows:
-- Overview KPIs (requests, suppliers, offers, revenue)
-- All requests table
-- All suppliers table  
-- All offers table (with supplier name, joined)
-- All payments table (with Moyasar ID and status)
+```sql
+-- في Supabase → Database → Extensions → فعّل pg_cron
+SELECT cron.schedule(
+  'auto-approve-reveals',
+  '*/30 * * * *',
+  'SELECT auto_approve_reveals()'
+);
+```
 
 ---
 
-## Sandbox mode behavior
+## ما لا يوجد الآن (مقصود)
 
-In `NODE_ENV=development` (local), the payment modal calls `/api/payment/sandbox-confirm` instead of Moyasar. This creates a real `payments` record and real `unlock_access` rows in the database — marked as `payment_method: sandbox`.
-
-In production (`NODE_ENV=production`), it calls `/api/payment` which creates a Moyasar session and redirects to their hosted payment page.
-
-To test sandbox in production (e.g. on Vercel staging), set:  
-`ALLOW_SANDBOX_CONFIRM=true`
-
----
-
-## Hardening checklist before go-live
-
-- [ ] Change `ADMIN_SECRET_TOKEN` to a long random string (`openssl rand -hex 32`)
-- [ ] Switch Moyasar to live key
-- [ ] Remove or disable `/api/payment/sandbox-confirm` route
-- [ ] Add rate limiting to `/api/requests` (prevent spam — e.g. 3 requests per IP per hour)
-- [ ] Add Supabase Auth so buyers can track their own requests by account
-- [ ] Add SMS notifications (Twilio or Unifonic) when offers arrive
-- [ ] Set up Supabase backups (Settings → Database → Backups)
-- [ ] Add error tracking (Sentry)
+- ❌ دفع (Moyasar أو غيره)
+- ❌ اشتراكات الموردين
+- ❌ نفاذ
+- ❌ سجل تجاري إلزامي
+- ❌ KYC ثقيل
+- ❌ تقييمات
+- ❌ chat
+- ❌ SEO pages
+- ❌ referrals
+- ❌ seed suppliers أو بيانات وهمية
 
 ---
 
-## Support
+## الموردون — قاعدة مهمة
 
-For deployment questions, open an issue or contact the development team.
+**لا توجد بيانات اختبار في schema.sql.**
+للاختبار الشخصي فقط:
+```sql
+-- احذفه قبل دعوة مشترين حقيقيين
+INSERT INTO suppliers (name, city, phone, whatsapp, category_id, supplier_type,
+                       verification_status, is_active)
+VALUES ('اختبار', 'الرياض', '05XXXXXXXX', '05XXXXXXXX', 'cars', 'store', 'approved', true);
+```
